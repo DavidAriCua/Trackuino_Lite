@@ -6,10 +6,10 @@ Este firmware es una modificación de Trackuino, un rasteador APRS open-source b
 Características
 ========
 
- * Arduino
- * GPS
- * Radio
+ * Arduino Due
+ * GPS Adafruit GPS MTK3339
+ * Trancseptor VHF
  * AFSK de 1200 baudios usando PWM de 8 bits.
  * Envía APRS estandar con mensajes de posición (latitud, longitud, altitud, rumbo, velocidad y tiempo).
- * POsibilidad de introducir sensores externos e internos.
+ * Posibilidad de introducir sensores externos e internos.
  * Open-source (GPLv2 license)
