@@ -15,119 +15,230 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
  */
 
-// Mpide 22 fails to compile Arduino code because it stupidly defines ARDUINO 
-// as an empty macro (hence the +0 hack). UNO32 builds are fine. Just use the
-// real Arduino IDE for Arduino builds. Optionally complain to the Mpide
-// authors to fix the broken macro.
-#if (ARDUINO + 0) == 0
-#error "Oops! We need the real Arduino IDE (version 22 or 23) for Arduino builds."
-#error "See trackuino.pde for details on this"
+/* Credit to:
+ *
+ * Michael Smith for his Example of Audio generation with two timers and PWM:
+ * http://www.arduino.cc/playground/Code/PCMAudio
+ *
+ * Ken Shirriff for his Great article on PWM:
+ * http://arcfn.com/2009/07/secrets-of-arduino-pwm.html 
+ *
+ * The large group of people who created the free AVR tools.
+ * Documentation on interrupts:
+ * http://www.nongnu.org/avr-libc/user-manual/group__avr__interrupts.html
+ */
 
-// Refuse to compile on arduino version 21 or lower. 22 includes an 
-// optimization of the USART code that is critical for real-time operation
-// of the AVR code.
-#elif (ARDUINO + 0) < 22
-#error "Oops! We need Arduino 22 or 23"
-#error "See trackuino.pde for details on this"
-
-#endif
-
-
-// Trackuino custom libs
 #include "config.h"
 #include "afsk_avr.h"
 #include "afsk_pic32.h"
-#include "aprs.h"
-#include "gps.h"
 #include "pin.h"
-#include "power.h"
-
-
-// Arduino/AVR libs
 #if (ARDUINO + 1) >= 100
-#  include <Arduino.h>
-#else
-#  include <WProgram.h>
-#endif
+#include <Arduino.h>
+#include <stdint.h>
 
-// Module constants
-static const uint32_t VALID_POS_TIMEOUT = 2000;  // ms
+// Module consts
 
-// Module variables
-static int32_t next_aprs = 0;
+// The actual baudrate after rounding errors will be:
+// PLAYBACK_RATE / (integer_part_of((PLAYBACK_RATE * 256) / BAUD_RATE) / 256)
+static const uint16_t BAUD_RATE       = 1200;
+static const uint16_t SAMPLES_PER_BAUD = ((uint32_t)PLAYBACK_RATE << 8) / BAUD_RATE;  // Fixed point 8.8
+static const uint16_t PHASE_DELTA_1200 = (((TABLE_SIZE * 1200UL) << 7) / PLAYBACK_RATE); // Fixed point 9.7
+static const uint16_t PHASE_DELTA_2200 = (((TABLE_SIZE * 2200UL) << 7) / PLAYBACK_RATE);
+static const uint8_t SAMPLE_FIFO_SIZE = 32;
+
+// Module globals
+volatile static uint8_t current_byte;
+volatile static uint16_t current_sample_in_baud;          // 1 bit = SAMPLES_PER_BAUD samples
+volatile static bool go = false;                         // Modem is on
+volatile static uint16_t phase_delta;                    // 1200/2200 for standard AX.25
+volatile static uint16_t phase;                          // Fixed point 9.7 (2PI = TABLE_SIZE)
+volatile static uint16_t packet_pos;                     // Next bit to be sent out
+volatile static uint8_t sample_fifo[SAMPLE_FIFO_SIZE];   // queue of samples
+volatile static uint8_t sample_fifo_head = 0;            // empty when head == tail
+volatile static uint8_t sample_fifo_tail = 0;
+volatile static uint32_t sample_overruns = 0;
+
+// The radio (class defined in config.h)
+// static Radio radio;
+
+volatile static unsigned int afsk_packet_size = 0;
+volatile static const uint8_t *afsk_packet;
 
 
-void setup()
+// Module functions
+
+inline static bool afsk_is_fifo_full()
 {
-  pinMode(LED_PIN, OUTPUT);
-  pin_write(LED_PIN, LOW);
-
-  Serial.begin(GPS_BAUDRATE);
-#ifdef DEBUG_RESET
-  Serial.println("RESET");
-#endif
-
-  afsk_setup();
-  gps_setup();
-
-  // Do not start until we get a valid time reference
-  // for slotted transmissions.
-  if (APRS_SLOT >= 0) {
-    do {
-      while (! Serial.available())
-        power_save();
-    } while (! gps_decode(Serial.read()));
-    
-    next_aprs = millis() + 1000 *
-      (APRS_PERIOD - (gps_seconds + APRS_PERIOD - APRS_SLOT) % APRS_PERIOD);
-  }
-  else {
-    next_aprs = millis();
-  }  
-  // TODO: beep while we get a fix, maybe indicating the number of
-  // visible satellites by a series of short beeps?
+  return (((sample_fifo_head + 1) % SAMPLE_FIFO_SIZE) == sample_fifo_tail);
 }
 
-void get_pos()
+inline static bool afsk_is_fifo_full_safe()
 {
-  // Get a valid position from the GPS
-  int valid_pos = 0;
-  uint32_t timeout = millis();
-
-#ifdef DEBUG_GPS
-  Serial.println("\nget_pos()");
-#endif
-
-  gps_reset_parser();
-
-  do {
-    if (Serial.available())
-      valid_pos = gps_decode(Serial.read());
-  } while ( (millis() - timeout < VALID_POS_TIMEOUT) && ! valid_pos) ;
+  noInterrupts();
+  boolean b = afsk_is_fifo_full();
+  interrupts();
+  return b;
 }
 
-void loop()
+inline static bool afsk_is_fifo_empty()
 {
-  // Time for another APRS frame
-  if ((int32_t) (millis() - next_aprs) >= 0) {
-    get_pos();
-    aprs_send();
-    next_aprs += APRS_PERIOD * 1000L;
-    while (afsk_flush()) {
-      power_save();
+  return (sample_fifo_head == sample_fifo_tail);
+}
+
+inline static bool afsk_is_fifo_empty_safe()
+{
+  noInterrupts();
+  bool b = afsk_is_fifo_empty();
+  interrupts();
+  return b;
+}
+
+inline static void afsk_fifo_in(uint8_t s)
+{
+  sample_fifo[sample_fifo_head] = s;
+  sample_fifo_head = (sample_fifo_head + 1) % SAMPLE_FIFO_SIZE;
+}
+ 
+inline static void afsk_fifo_in_safe(uint8_t s)
+{
+  noInterrupts();
+  afsk_fifo_in(s);
+  interrupts();
+}
+  
+inline static uint8_t afsk_fifo_out()
+{
+  uint8_t s = sample_fifo[sample_fifo_tail];
+  sample_fifo_tail = (sample_fifo_tail + 1) % SAMPLE_FIFO_SIZE;
+  return s;
+}
+
+inline static uint8_t afsk_fifo_out_safe()
+{
+  noInterrupts();
+  uint8_t b = afsk_fifo_out();
+  interrupts();
+  return b;
+}
+  
+
+// Exported functions
+
+void afsk_setup()
+{
+  // Start radio
+  // radio.setup();
+}
+
+void afsk_send(const uint8_t *buffer, int len)
+{
+  afsk_packet_size = len;
+  afsk_packet = buffer;
+}
+
+void afsk_start()
+{
+  phase_delta = PHASE_DELTA_1200;
+  phase = 0;
+  packet_pos = 0;
+  current_sample_in_baud = 0;
+  go = true;
+
+  // Prime the fifo
+  afsk_flush();
+
+  // Start timer (CPU-specific)
+  afsk_timer_setup();
+
+  // Key the radio
+  // radio.ptt_on();
+  
+  // Start transmission
+  afsk_timer_start();
+}
+
+bool afsk_flush()
+{
+  while (! afsk_is_fifo_full_safe()) {
+    // If done sending packet
+    if (packet_pos == afsk_packet_size) {
+      go = false;         // End of transmission
     }
+    if (go == false) {
+      if (afsk_is_fifo_empty_safe()) {
+        afsk_timer_stop();  // Disable modem
+        // radio.ptt_off();    // Release PTT
+        return false;       // Done
+      } else {
+        return true;
+      }
+    }
+
+    // If sent SAMPLES_PER_BAUD already, go to the next bit
+    if (current_sample_in_baud < (1 << 8)) {    // Load up next bit
+      if ((packet_pos & 7) == 0) {         // Load up next byte
+        current_byte = afsk_packet[packet_pos >> 3];
+      } else {
+        current_byte = current_byte / 2;  // ">>1" forces int conversion
+      }
+      if ((current_byte & 1) == 0) {
+        // Toggle tone (1200 <> 2200)
+        phase_delta ^= (PHASE_DELTA_1200 ^ PHASE_DELTA_2200);
+      }
+    }
+      
+    phase += phase_delta;
+    uint8_t s = afsk_read_sample((phase >> 7) & (TABLE_SIZE - 1));
+
+#ifdef DEBUG_AFSK
+    Serial.print((uint16_t)s);
+    Serial.print('/');
+#endif
+  
+#if PRE_EMPHASIS == 1
+    if (phase_delta == PHASE_DELTA_1200)
+      s = s / 2 + 64;
+#endif
+
+#ifdef DEBUG_AFSK
+    Serial.print((uint16_t)s);
+    Serial.print(' ');
+#endif
+
+    afsk_fifo_in_safe(s);
+  
+    current_sample_in_baud += (1 << 8);
+    if (current_sample_in_baud >= SAMPLES_PER_BAUD) {
+#ifdef DEBUG_AFSK
+      Serial.println();
+#endif
+      packet_pos++;
+      current_sample_in_baud -= SAMPLES_PER_BAUD;
+    }
+  }
+
+  return true;  // still working
+}
+
+// This is called at PLAYBACK_RATE Hz to load the next sample.
+AFSK_ISR
+{
+  if (afsk_is_fifo_empty()) {
+    if (go) {
+      sample_overruns++;
+    }
+  } else {
+    afsk_output_sample(afsk_fifo_out());
+  }
+  afsk_clear_interrupt_flag();
+}
 
 #ifdef DEBUG_MODEM
-    // Show modem ISR stats from the previous transmission
-    afsk_debug();
-#endif
+void afsk_debug()
+{
+  Serial.print("fifo overruns=");
+  Serial.println(sample_overruns);
 
-  } else {
-    // Discard GPS data received during sleep window
-    while (Serial.available()) {
-      Serial.read();
-    }
-  }
-
-  power_save(); // Incoming GPS data or interrupts will wake us up
+  sample_overruns = 0;
 }
+#endif

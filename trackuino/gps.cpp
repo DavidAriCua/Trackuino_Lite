@@ -15,13 +15,10 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
  */
 
+
 #include "config.h"
 #include "gps.h"
-#if (ARDUINO + 1) >= 100
-#  include <Arduino.h>
-#else
-#  include <WProgram.h>
-#endif
+#include <Arduino.h>
 #include <stdlib.h>
 #include <string.h>
 

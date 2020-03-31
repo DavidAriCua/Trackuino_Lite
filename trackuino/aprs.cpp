@@ -21,18 +21,8 @@
 #include "aprs.h"
 #include <stdio.h>
 #include <stdlib.h>
-#if (ARDUINO + 1) >= 100
-#  include <Arduino.h>
-#else
-#  include <WProgram.h>
-#endif
+// #include <Arduino.h>
 
-// Module functions
-float meters_to_feet(float m)
-{
-  // 10000 ft = 3048 m
-  return m / 0.3048;
-}
 
 // Exported functions
 void aprs_send()
@@ -64,7 +54,7 @@ void aprs_send()
   snprintf(temp, 4, "%03d", (int)(gps_speed + 0.5));
   ax25_send_string(temp);             // speed (knots)
   ax25_send_string("/A=");            // Altitude (feet). Goes anywhere in the comment area
-  snprintf(temp, 7, "%06ld", (long)(meters_to_feet(gps_altitude) + 0.5));
+  snprintf(temp, 7, "%06ld", (long)(gps_altitude + 0.5));
   ax25_send_string(temp);
   ax25_send_byte(' ');
   ax25_send_string(APRS_COMMENT);     // Comment

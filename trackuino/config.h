@@ -35,7 +35,7 @@
 #define S_CALLSIGN      "EA4RCT" // Usamos el indicativo del club de radio de la escuela
 #define S_CALLSIGN_ID   11 // Usamos el ID 11, que nos indentifica como un globo. Más info: http://www.aprs.org/aprs11/SSIDs.txt
 
-// Indicativo del destino APRS (with SSID=0) is usually okay.
+// Indicativo del destino APRS (con SSID=0) suele estar bien.
 #define D_CALLSIGN      "APRS"
 #define D_CALLSIGN_ID   0
 
@@ -99,12 +99,6 @@
 // into an overall lower amplitude of the received signal. 1 = yes, 0 = no.
 #define PRE_EMPHASIS    1
 
-// --------------------------------------------------------------------------
-// Radio config (radio_hx1.cpp)
-// --------------------------------------------------------------------------
-
-// This is the PTT pin
-#define PTT_PIN           4
 
 
 // --------------------------------------------------------------------------

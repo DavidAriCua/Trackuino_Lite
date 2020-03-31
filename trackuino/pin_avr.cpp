@@ -20,11 +20,7 @@
 #include "pin.h"
 #include <stdint.h>
 #include <pins_arduino.h>
-#if (ARDUINO + 1) >= 100
-#  include <Arduino.h>
-#else
-#  include <WProgram.h>
-#endif
+#include <Arduino.h>
 
 // This is a digitalWrite() replacement that does not disrupt
 // timer 2.
